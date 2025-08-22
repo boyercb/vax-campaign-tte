@@ -199,7 +199,18 @@ def simulate_outbreak(G, steps, plot=True, print_progress=True, vaccination_sche
         plt.tight_layout()
         plt.show()
 
-    return G
+    # Return graph and time series data
+    time_series_data = {
+        'infected_over_time': infected_over_time,
+        'recovered_over_time': recovered_over_time,
+        'dead_over_time': dead_over_time,
+        'tested_over_time': tested_over_time,
+        'vaccinated_over_time': vaccinated_over_time,
+        'tested_over_time_vaccinated': tested_over_time_vaccinated,
+        'tested_over_time_unvaccinated': tested_over_time_unvaccinated
+    }
+    
+    return G, time_series_data
 
 def estimate_models(G, outcome='tested', print_results=True):
     """
@@ -234,26 +245,54 @@ def estimate_models(G, outcome='tested', print_results=True):
     else:
         raise ValueError("Outcome must be 'tested', 'infected', or 'death'")
 
+    # Check if there are any vaccinated individuals
+    num_vaccinated = data['vaccinated'].sum()
+    
+    if num_vaccinated == 0:
+        if print_results:
+            print(f"No vaccinated individuals found for {outcome} analysis.")
+            print("Cannot estimate vaccine effectiveness - returning NaN")
+        return np.nan, np.nan
+    
+    # Check if there's variation in vaccination status
+    if num_vaccinated == len(data):
+        if print_results:
+            print(f"All individuals are vaccinated for {outcome} analysis.")
+            print("No variation in vaccination status - returning NaN")
+        return np.nan, np.nan
+    
     # Fit Cox proportional hazards model
     df = data[['event_time', 'event', 'vaccinated', 'X']].copy()
     model = CoxPHFitter()
-    model.fit(df, duration_col='event_time', event_col='event')
+    
+    try:
+        model.fit(df, duration_col='event_time', event_col='event')
+        hr_basic = np.exp(model.params_['vaccinated'])
+    except Exception as e:
+        if print_results:
+            print(f"Error fitting basic Cox model for {outcome}: {e}")
+        hr_basic = np.nan
     
     # Fit model with unmeasured confounder
     df_with_u = data[['event_time', 'event', 'vaccinated', 'X', 'U']].copy()
     model_with_u = CoxPHFitter()
-    model_with_u.fit(df_with_u, duration_col='event_time', event_col='event')
-
-    # Extract hazard ratios for vaccination status
-    hr = np.exp(model.params_)
-    hr_with_u = np.exp(model_with_u.params_)
     
-    if print_results:
-        print(f"Hazard Ratios for {outcome} (without unmeasured confounder):\n", hr)
-        print(f"Hazard Ratios for {outcome} (with unmeasured confounder):\n", hr_with_u)
+    try:
+        model_with_u.fit(df_with_u, duration_col='event_time', event_col='event')
+        hr_with_u = np.exp(model_with_u.params_['vaccinated'])
+    except Exception as e:
+        if print_results:
+            print(f"Error fitting confounded Cox model for {outcome}: {e}")
+        hr_with_u = np.nan
+    
+    if print_results and not (np.isnan(hr_basic) or np.isnan(hr_with_u)):
+        print(f"Hazard Ratios for {outcome}:")
+        print(f"  Without unmeasured confounder: {hr_basic:.3f}")
+        print(f"  With unmeasured confounder: {hr_with_u:.3f}")
+        print(f"  Number vaccinated: {num_vaccinated}/{len(data)} ({num_vaccinated/len(data)*100:.1f}%)")
 
     # Return hazard ratio estimates for vaccination status
-    return hr['vaccinated'], hr_with_u['vaccinated']
+    return hr_basic, hr_with_u
 
 def run_simulation(num_nodes=1000, edges_per_node=5, infection_prob=0.02, 
                   recovery_prob=0.1, death_prob=0.01, testing_prob=0.3, 
@@ -290,7 +329,7 @@ def run_simulation(num_nodes=1000, edges_per_node=5, infection_prob=0.02,
     assign_initial_infected(G, num_initial_infected)
     
     # Run simulation
-    G = simulate_outbreak(G, steps, plot=plot, print_progress=print_progress, 
+    G, time_series_data = simulate_outbreak(G, steps, plot=plot, print_progress=print_progress, 
                          vaccination_schedule=vaccination_schedule)
     
     # Estimate models
@@ -299,7 +338,8 @@ def run_simulation(num_nodes=1000, edges_per_node=5, infection_prob=0.02,
     results = {
         'hr_basic': hr_basic,
         'hr_with_unmeasured_confounder': hr_with_u,
-        'outcome': outcome
+        'outcome': outcome,
+        'time_series': time_series_data
     }
     
     return G, results
